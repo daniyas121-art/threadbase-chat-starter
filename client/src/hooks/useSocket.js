@@ -1,42 +1,77 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { io } from "socket.io-client";
 import { useAuth } from "../auth/AuthContext.jsx";
-// Task: npm install socket.io-client, then:  import { io } from "socket.io-client";
 
-// TODO (Tasks 3-4): implement the live socket connection.
-//
-// export function useSocket(roomId) {
-//   const { token } = useAuth();
-//   const [messages, setMessages] = useState([]);
-//   const [socket, setSocket] = useState(null);
-//
-//   useEffect(() => {
-//     if (!token) return;
-//     const s = io(import.meta.env.VITE_SOCKET_URL, { auth: { token } }); // token -> handshake.auth.token
-//     setSocket(s);
-//     s.emit("room:join", roomId);
-//     const onMessage = (msg) => setMessages((prev) => [...prev, msg]);
-//     s.on("chat:message", onMessage);
-//     return () => {
-//       s.off("chat:message", onMessage);   // remove THIS listener
-//       s.disconnect();                     // close the connection
-//     };
-//   }, [token, roomId]);
-//
-//   const sendMessage = useCallback(
-//     (text) => socket?.emit("chat:message", { roomId, text }),
-//     [socket, roomId]
-//   );
-//
-//   return { messages, sendMessage };
-// }
+const SOCKET_URL =
+  import.meta.env.VITE_SOCKET_URL ||
+  import.meta.env.VITE_API_BASE_URL ||
+  "http://localhost:3001";
 
-// Placeholder so the app runs before you implement the hook.
-// Replace this whole function with the real implementation above.
 export function useSocket(roomId) {
-  useAuth(); // token is available here via useAuth().token
-  const [messages] = useState([]);
+  const { token } = useAuth();
+  const [messages, setMessages] = useState([]);
+  const socketRef = useRef(null);
+  const roomReadyRef = useRef(false);
+  const pendingMessagesRef = useRef([]);
+
+  useEffect(() => {
+    setMessages([]);
+    roomReadyRef.current = false;
+    pendingMessagesRef.current = [];
+    if (!token || !roomId) {
+      socketRef.current = null;
+      return undefined;
+    }
+
+    const socket = io(SOCKET_URL, { auth: { token } });
+    socketRef.current = socket;
+
+    const onMessage = (message) => {
+      setMessages((current) => [...current, message]);
+    };
+    const joinRoom = () => {
+      roomReadyRef.current = false;
+      socket.emit("room:join", roomId, (result) => {
+        if (socketRef.current !== socket || !result?.ok) return;
+        roomReadyRef.current = true;
+        const queuedMessages = pendingMessagesRef.current;
+        pendingMessagesRef.current = [];
+        queuedMessages.forEach((text) => {
+          socket.emit("chat:message", { roomId, text });
+        });
+      });
+    };
+    const onDisconnect = () => {
+      roomReadyRef.current = false;
+    };
+
+    socket.on("chat:message", onMessage);
+    socket.on("connect", joinRoom);
+    socket.on("disconnect", onDisconnect);
+    if (socket.connected) joinRoom();
+
+    return () => {
+      socket.off("chat:message", onMessage);
+      socket.off("connect", joinRoom);
+      socket.off("disconnect", onDisconnect);
+      socket.disconnect();
+      if (socketRef.current === socket) socketRef.current = null;
+      roomReadyRef.current = false;
+      pendingMessagesRef.current = [];
+    };
+  }, [token, roomId]);
+
   const sendMessage = useCallback((text) => {
-    console.log("sendMessage not wired yet:", roomId, text);
+    if (typeof text !== "string" || !text.trim()) return;
+
+    const cleanText = text.trim();
+    const socket = socketRef.current;
+    if (!socket || !roomReadyRef.current) {
+      pendingMessagesRef.current.push(cleanText);
+      return;
+    }
+    socket.emit("chat:message", { roomId, text: cleanText });
   }, [roomId]);
+
   return { messages, sendMessage };
 }
